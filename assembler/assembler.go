@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -52,9 +53,11 @@ func ParseLine(line string) (uint32, error) {
 		str_slice[0] = strings.TrimSpace(strings.ToLower(str_slice[0]))
 		str_slice[1] = strings.TrimSuffix(strings.TrimSpace(str_slice[1]), ",")
 		str_slice[2] = strings.TrimSuffix(strings.TrimSpace(str_slice[2]), ",")
-		str_slice[3] = strings.TrimSpace(str_slice[3]) //Risc-V can have at most 3 operands so trim comma off of them if possible
+		if len(str_slice) > 3 {
+			str_slice[3] = strings.TrimSpace(str_slice[3]) //Risc-V can have at most 3 operands so trim comma off of them if possible
+		}
 		//Checks if there are any more arguments and return error. 4th index can only be comments
-		if len(str_slice[4]) > 0 && str_slice[4][0] != '#' {
+		if len(str_slice) > 4 && len(str_slice[4]) > 0 && str_slice[4][0] != '#' {
 			return 0, errors.New("extra arguments given")
 		}
 
@@ -76,7 +79,28 @@ func ParseLine(line string) (uint32, error) {
 			//fmt.Printf("%032b\n", instruction)
 			return uint32(instruction), nil
 		case I: // immediate / loads / jalr: rd, rs1, imm  OR  lw rd, offset(rs1)
-
+			rd, inRd := regMap[str_slice[1]]
+			rs1, inRs1 := regMap[str_slice[2]]
+			immediate, err := strconv.Atoi(str_slice[3])
+			if err != nil {
+				log.Fatal(err)
+			}
+			if str_slice[0] == "ssli" || str_slice[0] == "srli" || str_slice[0] == "srai" {
+				immediate &= 0x1F
+				if str_slice[0] == "srai" {
+					immediate |= 0x20 << 5
+				}
+			}
+			if !inRd || !inRs1 {
+				return 0, errors.New("invalid registers")
+			}
+			instruction |= uint32(itype.Opcode)
+			instruction |= uint32(rd) << 7
+			instruction |= uint32(itype.funct3) << 12
+			instruction |= uint32(rs1) << 15
+			instruction |= uint32(immediate) << 20
+			fmt.Printf("%032b\n", instruction)
+			return uint32(instruction), nil
 		// case S: // store: rs2, offset(rs1)
 
 		// case B: // branch: rs1, rs2, label
