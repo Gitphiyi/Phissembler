@@ -2,6 +2,7 @@ package assembler
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -34,30 +35,47 @@ func ParseFile(filename string) []string {
 	return lines
 }
 
-// cleans every line of code getting rid of comments and ensuring everything is in the correct format
-func ParseLine(line string) {
+// cleans every line of code getting rid of comments and ensuring everything is in the correct format. Returns (instruction, error)
+func ParseLine(line string) (uint32, error) {
 	fmt.Println(line)
-
 	//directive
 	if line[0] == '.' {
 		fmt.Println("directive")
 	} else {
 		var str_slice = strings.SplitAfterN(line, " ", 5)
-
 		//is label
 		if strings.HasSuffix(str_slice[0], ":") {
 			fmt.Println("label")
-			return
+			return 0, nil
 		}
-		str_slice[0] = strings.ToLower(str_slice[0])
-		str_slice[1] = strings.TrimSuffix(str_slice[1], ",")
-		str_slice[2] = strings.TrimSuffix(str_slice[2], ",") //Risc-V can have at most 3 operands so trim comma off of them if possible
+
+		str_slice[0] = strings.TrimSpace(strings.ToLower(str_slice[0]))
+		str_slice[1] = strings.TrimSuffix(strings.TrimSpace(str_slice[1]), ",")
+		str_slice[2] = strings.TrimSuffix(strings.TrimSpace(str_slice[2]), ",")
+		str_slice[3] = strings.TrimSpace(str_slice[3]) //Risc-V can have at most 3 operands so trim comma off of them if possible
+		//Checks if there are any more arguments and return error. 4th index can only be comments
+		if len(str_slice[4]) > 0 && str_slice[4][0] != '#' {
+			return 0, errors.New("extra arguments given")
+		}
 
 		itype := InstrTable[str_slice[0]]
-		switch itype {
-		// case R: // 3 operands: opcode, rd, funct3, rs1, rs2, funct7
-
-		// case I: // immediate / loads / jalr: rd, rs1, imm  OR  lw rd, offset(rs1)
+		instruction := uint32(0x00000000)
+		switch itype.fmt {
+		case R: // 3 operands: opcode, rd, funct3, rs1, rs2, funct7
+			rd, inRd := regMap[str_slice[1]]
+			rs1, inRs1 := regMap[str_slice[2]]
+			rs2, inRs2 := regMap[str_slice[3]]
+			if !inRd || !inRs1 || !inRs2 {
+				return 0, errors.New("invalid registers")
+			}
+			instruction |= uint32(itype.Opcode)
+			instruction |= uint32(rd) << 7
+			instruction |= uint32(itype.funct3) << 12
+			instruction |= uint32(rs1) << 15
+			instruction |= uint32(rs2) << 20
+			//fmt.Printf("%032b\n", instruction)
+			return uint32(instruction), nil
+		case I: // immediate / loads / jalr: rd, rs1, imm  OR  lw rd, offset(rs1)
 
 		// case S: // store: rs2, offset(rs1)
 
@@ -76,9 +94,5 @@ func ParseLine(line string) {
 			fmt.Println(i)
 		}
 	} // Instruction & labels
-}
-
-// transforms the assembly to binary
-func transform_to_bin() {
-
+	return 0, nil
 }
