@@ -2,6 +2,20 @@ package assembler
 
 import "fmt"
 
+type Section struct {
+	name string
+	addr ilen
+	sz   ilen //byte buffer size. initialize this to 0.
+}
+type Symbol struct {
+	name   string
+	addr   ilen
+	global bool
+}
+
+type ilen uint64 //instruction length
+const ILEN_BYTES ilen = 8
+
 // register mapping
 var regMap = make(map[string]uint8, 64)
 
