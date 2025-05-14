@@ -8,7 +8,7 @@ const ILEN_BYTES ilen = 8
 type Section struct {
 	name string
 	addr ilen
-	sz   ilen //byte buffer size. initialize this to 0.
+	sz   ilen //byte buffer size in BYTES. initialize this to 0.
 }
 type Symbol struct {
 	section *Section

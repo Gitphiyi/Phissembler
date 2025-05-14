@@ -15,6 +15,16 @@ var symbolTable = make(map[string]Symbol) //symbol mapping
 var valueTable = make(map[string]ilen)
 var sectionTable = make(map[string]*Section)
 
+func Print_Info() {
+	fmt.Println("All .equ values: ")
+	for key, val := range valueTable {
+		fmt.Printf("\t %s: %d\n", key, val)
+	}
+	for key, val := range sectionTable {
+		fmt.Printf("Section: %s (addr, sz) = (0x%X, %d bytes)\n", key, val.addr, val.sz)
+	}
+}
+
 // minimal cleaning and just returns slice of all lines that aren't empty or start with comments
 func ParseFile(filename string) []string {
 	fmt.Printf("Parsing Assembly File %s...\n", filename)
@@ -46,7 +56,7 @@ func FirstPass(instructions []string) {
 	var addr ilen = 0x0
 
 	for i := 0; i < len(instructions); i++ {
-		_, new_addr, err := FirstPassLine(instructions[i], ilen(addr), &section)
+		new_addr, err := FirstPassLine(instructions[i], ilen(addr), &section)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -62,26 +72,29 @@ func SecondPass(instructions []string) {
 }
 
 // cleans every line of code getting rid of comments and ensuring everything is in the correct format. Returns (instruction, addr, error)
-func FirstPassLine(line string, prev_addr ilen, section *string) (ilen, ilen, error) {
+func FirstPassLine(line string, prev_addr ilen, section *string) (ilen, error) {
 	fmt.Println(line)
 	var addr = prev_addr
 	var str_slice = strings.SplitAfterN(line, " ", 5)
 
 	str_slice[0] = strings.TrimSpace(strings.ToLower(str_slice[0]))
-	str_slice[1] = strings.TrimSuffix(strings.TrimSpace(str_slice[1]), ",")
-	str_slice[2] = strings.TrimSuffix(strings.TrimSpace(str_slice[2]), ",")
-	if len(str_slice) > 3 {
-		str_slice[3] = strings.TrimSpace(str_slice[3]) //Risc-V can have at most 3 operands so trim comma off of them if possible
-	}
-	//Checks if there are any more arguments and return error. 4th index can only be comments
-	if len(str_slice) > 4 && len(str_slice[4]) > 0 && str_slice[4][0] != '#' {
-		return 0, addr, errors.New("extra arguments given")
+	if len(str_slice) > 1 && str_slice[1][0] != '#' {
+		str_slice[1] = strings.TrimSuffix(strings.TrimSpace(str_slice[1]), ",")
+		if len(str_slice) > 2 && str_slice[2][0] != '#' {
+			str_slice[2] = strings.TrimSuffix(strings.TrimSpace(str_slice[2]), ",")
+			if len(str_slice) > 3 && str_slice[3][0] != '#' {
+				str_slice[3] = strings.TrimSpace(str_slice[3]) //Risc-V can have at most 3 operands so trim comma off of them if possible
+				//Checks if there are any more arguments and return error. 4th index can only be comments
+				if len(str_slice) > 4 && str_slice[4][0] != '#' {
+					return addr, errors.New("extra arguments given")
+				}
+			}
+		}
 	}
 
 	//line is a directive
 	if line[0] == '.' {
-		fmt.Println("directive")
-		switch line {
+		switch str_slice[0] {
 		case ".org": //set location counter to absolute offset line[1]
 			val, err := strconv.ParseUint(str_slice[1], 0, 32)
 			if err != nil {
@@ -139,6 +152,12 @@ func FirstPassLine(line string, prev_addr ilen, section *string) (ilen, ilen, er
 			sec.sz += ilen(str_sz)
 			addr += align_addr(ilen(str_sz)) //increases address by aligned amount
 
+		case ".zero":
+			zero_sz := ilen(len(str_slice[1]))
+			sec := sectionTable[*section]
+			sec.sz += ilen(zero_sz)
+			addr += align_addr(ilen(zero_sz))
+
 		case ".half": // 16 bit words
 			words := strings.Split(str_slice[1], ",")
 			word_sz := ilen(len(words)) * ILEN_BYTES / 4
@@ -163,104 +182,121 @@ func FirstPassLine(line string, prev_addr ilen, section *string) (ilen, ilen, er
 		default:
 			log.Fatal("unknown assembler directive!")
 		}
-		return 0, addr, nil
+		return addr, nil
 	} else {
 		//default is .text
 		if *section == "" {
 			*section = ".text"
 			sectionTable[*section] = &Section{name: ".text", addr: addr, sz: 0}
 		}
-
+		sec := sectionTable[*section]
 		//is label
 		if strings.HasSuffix(str_slice[0], ":") {
 			str_slice[0] = strings.TrimSuffix(str_slice[0], ":")
 			symbolTable[str_slice[0]] = Symbol{section: sectionTable[*section], name: str_slice[0], offset: addr, global: false}
-			return 0, addr, nil
 		}
-
-		// eventually add functionality to account for when the immediate is too big
-		itype := InstrTable[str_slice[0]]
-		instruction := ilen(0x000000000)
-		switch itype.fmt {
-		case R: // 3 operands: opcode, rd, funct3, rs1, rs2, funct7
-			rd, inRd := regMap[str_slice[1]]
-			rs1, inRs1 := regMap[str_slice[2]]
-			rs2, inRs2 := regMap[str_slice[3]]
-			if !inRd || !inRs1 || !inRs2 {
-				return 0, addr, errors.New("invalid registers")
-			}
-			instruction |= ilen(itype.Opcode)
-			instruction |= ilen(rd) << 7
-			instruction |= ilen(itype.funct3) << 12
-			instruction |= ilen(rs1) << 15
-			instruction |= ilen(rs2) << 20
-			//fmt.Printf("%032b\n", instruction)
-		case I: // immediate / loads / jalr: rd, rs1, imm  OR  lw rd, offset(rs1)
-			rd, inRd := regMap[str_slice[1]]
-			rs1, inRs1 := regMap[str_slice[2]]
-			immediate, err := strconv.Atoi(str_slice[3])
-			if err != nil {
-				log.Fatal(err)
-			}
-			if str_slice[0] == "ssli" || str_slice[0] == "srli" || str_slice[0] == "srai" {
-				immediate &= 0x1F
-				if str_slice[0] == "srai" {
-					immediate |= 0x20 << 5
-				}
-			}
-			if !inRd || !inRs1 {
-				return 0, addr, errors.New("invalid registers")
-			}
-			instruction |= ilen(itype.Opcode)
-			instruction |= ilen(rd) << 7
-			instruction |= ilen(itype.funct3) << 12
-			instruction |= ilen(rs1) << 15
-			instruction |= ilen(immediate) << 20
-			fmt.Printf("%032b\n", instruction)
-
-		case S: // store: rs2, offset(rs1)
-			open := strings.Index(str_slice[2], "(")
-			close := strings.Index(str_slice[2], ")")
-			if open < 0 || close < 0 || close <= open {
-				return 0, 0, errors.New("invalid format, expected imm(reg)")
-			}
-			imm := str_slice[2][:open]
-			reg := str_slice[2][open+1 : close]
-			immediate, err := strconv.Atoi(imm)
-			if err != nil {
-				log.Fatal(err)
-			}
-			first_imm := immediate & 0b11111
-			sec_imm := immediate & 0b11111110000
-
-			rs1, inRs1 := regMap[reg]
-			rs2, inRs2 := regMap[str_slice[3]]
-			if !inRs1 || !inRs2 {
-				return 0, addr, errors.New("invalid registers")
-			}
-			instruction |= ilen(itype.Opcode)
-			instruction |= ilen(first_imm) << 7
-			instruction |= ilen(itype.funct3) << 12
-			instruction |= ilen(rs1) << 15
-			instruction |= ilen(rs2) << 20
-			instruction |= ilen(sec_imm) << 25
-
-		// case B: // branch: rs1, rs2, label
-
-		// case U: // upper-immediate: rd, imm
-
-		// case J: // jump: rd, label
-
-		// case C:
-
-		default:
-			log.Fatalf("unsupported instruction format %q", itype.fmt)
-		}
-		addr += ILEN_BYTES
-		return ilen(instruction), addr, nil
-
+		sec.sz += ILEN_BYTES
+		return addr, nil
 	} // Instruction & labels
 }
+
+// func SecondPassLine(line string, prev_addr ilen, section *string) {
+// 	fmt.Println(line)
+// 	var addr = prev_addr
+// 	var str_slice = strings.SplitAfterN(line, " ", 5)
+
+// 	str_slice[0] = strings.TrimSpace(strings.ToLower(str_slice[0]))
+// 	str_slice[1] = strings.TrimSuffix(strings.TrimSpace(str_slice[1]), ",")
+// 	str_slice[2] = strings.TrimSuffix(strings.TrimSpace(str_slice[2]), ",")
+// 	if len(str_slice) > 3 {
+// 		str_slice[3] = strings.TrimSpace(str_slice[3]) //Risc-V can have at most 3 operands so trim comma off of them if possible
+// 	}
+// 	//Checks if there are any more arguments and return error. 4th index can only be comments
+// 	if len(str_slice) > 4 && len(str_slice[4]) > 0 && str_slice[4][0] != '#' {
+// 		return 0, addr, errors.New("extra arguments given")
+// 	}
+// 	// eventually add functionality to account for when the immediate is too big
+// 	itype := InstrTable[str_slice[0]]
+// 	instruction := ilen(0x000000000)
+// 	switch itype.fmt {
+// 	case R: // 3 operands: opcode, rd, funct3, rs1, rs2, funct7
+// 		rd, inRd := regMap[str_slice[1]]
+// 		rs1, inRs1 := regMap[str_slice[2]]
+// 		rs2, inRs2 := regMap[str_slice[3]]
+// 		if !inRd || !inRs1 || !inRs2 {
+// 			return 0, addr, errors.New("invalid registers")
+// 		}
+// 		instruction |= ilen(itype.Opcode)
+// 		instruction |= ilen(rd) << 7
+// 		instruction |= ilen(itype.funct3) << 12
+// 		instruction |= ilen(rs1) << 15
+// 		instruction |= ilen(rs2) << 20
+// 		//fmt.Printf("%032b\n", instruction)
+// 	case I: // immediate / loads / jalr: rd, rs1, imm  OR  lw rd, offset(rs1)
+// 		rd, inRd := regMap[str_slice[1]]
+// 		rs1, inRs1 := regMap[str_slice[2]]
+// 		immediate, err := strconv.Atoi(str_slice[3])
+// 		if err != nil {
+// 			log.Fatal(err)
+// 		}
+// 		if str_slice[0] == "ssli" || str_slice[0] == "srli" || str_slice[0] == "srai" {
+// 			immediate &= 0x1F
+// 			if str_slice[0] == "srai" {
+// 				immediate |= 0x20 << 5
+// 			}
+// 		}
+// 		if !inRd || !inRs1 {
+// 			return 0, addr, errors.New("invalid registers")
+// 		}
+// 		instruction |= ilen(itype.Opcode)
+// 		instruction |= ilen(rd) << 7
+// 		instruction |= ilen(itype.funct3) << 12
+// 		instruction |= ilen(rs1) << 15
+// 		instruction |= ilen(immediate) << 20
+// 		fmt.Printf("%032b\n", instruction)
+
+// 	case S: // store: rs2, offset(rs1)
+// 		open := strings.Index(str_slice[2], "(")
+// 		close := strings.Index(str_slice[2], ")")
+// 		if open < 0 || close < 0 || close <= open {
+// 			return 0, 0, errors.New("invalid format, expected imm(reg)")
+// 		}
+// 		imm := str_slice[2][:open]
+// 		reg := str_slice[2][open+1 : close]
+// 		immediate, err := strconv.Atoi(imm)
+// 		if err != nil {
+// 			log.Fatal(err)
+// 		}
+// 		first_imm := immediate & 0b11111
+// 		sec_imm := immediate & 0b11111110000
+
+// 		rs1, inRs1 := regMap[reg]
+// 		rs2, inRs2 := regMap[str_slice[3]]
+// 		if !inRs1 || !inRs2 {
+// 			return 0, addr, errors.New("invalid registers")
+// 		}
+// 		instruction |= ilen(itype.Opcode)
+// 		instruction |= ilen(first_imm) << 7
+// 		instruction |= ilen(itype.funct3) << 12
+// 		instruction |= ilen(rs1) << 15
+// 		instruction |= ilen(rs2) << 20
+// 		instruction |= ilen(sec_imm) << 25
+
+// 	// case B: // branch: rs1, rs2, label
+
+// 	// case U: // upper-immediate: rd, imm
+
+// 	// case J: // jump: rd, label
+
+// 	// case C:
+
+// 	default:
+// 		log.Fatalf("unsupported instruction format %q", itype.fmt)
+// 	}
+// 	addr += ILEN_BYTES
+// 	return ilen(instruction), addr, nil
+
+// }
 
 func handle_equ(expression string) ilen {
 	return 0

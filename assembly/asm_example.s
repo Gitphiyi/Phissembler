@@ -1,7 +1,7 @@
 .org 0x42
 .text
 # rando
-.align 256
+.align 256 # 0x100
 .globl       _start 
 .local      deez
     add t0, a0, a1 # R instruction test
@@ -13,7 +13,10 @@ wakanda:
     .asciz "retarded shi"
 
 .data
+.equ fab, 123
 msg: 
     .asciz "hi\n"
+zeros:
+    .zero 20
 array:
 .word 0x3f800000, 0x3f800001, 0x3f800002
