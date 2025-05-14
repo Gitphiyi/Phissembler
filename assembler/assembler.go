@@ -12,11 +12,12 @@ import (
 )
 
 var symbolTable = make(map[string]Symbol) //symbol mapping
-var sectionTable = make(map[string]Section)
+var valueTable = make(map[string]ilen)
+var sectionTable = make(map[string]*Section)
 
 // minimal cleaning and just returns slice of all lines that aren't empty or start with comments
 func ParseFile(filename string) []string {
-	fmt.Printf("Parse Assembly File %s...\n", filename)
+	fmt.Printf("Parsing Assembly File %s...\n", filename)
 	data, err := os.Open(filename)
 	if err != nil {
 		data.Close()
@@ -39,12 +40,13 @@ func ParseFile(filename string) []string {
 	return lines
 }
 
+// Loop through every directve/instruction. Record which section each one is in and the offset address it is in each respective section
 func FirstPass(instructions []string) {
 	var section = ""
 	var addr ilen = 0x0
 
 	for i := 0; i < len(instructions); i++ {
-		_, new_addr, err := ParseLine(instructions[i], ilen(addr), &section)
+		_, new_addr, err := FirstPassLine(instructions[i], ilen(addr), &section)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -52,11 +54,17 @@ func FirstPass(instructions []string) {
 	}
 }
 
+// loop through every instruction and plug in addresses of .words, .dword, .equ etc into instructions. Fill in actual value into memory for .words and such
+func SecondPass(instructions []string) {
+	for i := 0; i < len(instructions); i++ {
+
+	}
+}
+
 // cleans every line of code getting rid of comments and ensuring everything is in the correct format. Returns (instruction, addr, error)
-func ParseLine(line string, prev_addr ilen, section *string) (ilen, ilen, error) {
+func FirstPassLine(line string, prev_addr ilen, section *string) (ilen, ilen, error) {
 	fmt.Println(line)
-	//var curr_sec = sectionTable[*section]
-	var addr = prev_addr + ILEN_BYTES
+	var addr = prev_addr
 	var str_slice = strings.SplitAfterN(line, " ", 5)
 
 	str_slice[0] = strings.TrimSpace(strings.ToLower(str_slice[0]))
@@ -84,29 +92,74 @@ func ParseLine(line string, prev_addr ilen, section *string) (ilen, ilen, error)
 		case ".align": //align to specified boundary
 			if *section == "" {
 				*section = ".text"
-				sectionTable[*section] = Section{name: "text", addr: addr, sz: 0}
+				sectionTable[*section] = &Section{name: ".text", addr: addr, sz: 0}
 			}
-			val, err := strconv.ParseUint(str_slice[1], 0, 32)
+			pow, err := strconv.ParseUint(str_slice[1], 0, 32)
 			if err != nil {
 				log.Fatal("immediate given is not decimal, hex, nor binary")
 			}
-			remainder := ilen(val) - (addr % ilen(val))
+			remainder := ilen(2^pow) - (addr % ilen(2^pow))
 			addr += remainder //aligns address
 			sec := sectionTable[*section]
 			sec.sz += remainder
 
 		case ".globl":
-			symbolTable[str_slice[1]] = Symbol{name: str_slice[1], addr: addr, global: true}
+			if *section == "" {
+				*section = ".text"
+				sectionTable[*section] = &Section{name: ".text", addr: addr, sz: 0}
+			}
+			secBase := sectionTable[*section].addr
+			symbolTable[str_slice[1]] = Symbol{section: sectionTable[*section], name: str_slice[1], offset: addr - secBase, global: true}
 
 		case ".local":
-			symbolTable[str_slice[1]] = Symbol{name: str_slice[1], addr: addr, global: false}
+			if *section == "" {
+				*section = ".text"
+				sectionTable[*section] = &Section{name: ".text", addr: addr, sz: 0}
+			}
+			secBase := sectionTable[*section].addr
+			symbolTable[str_slice[1]] = Symbol{section: sectionTable[*section], name: str_slice[1], offset: addr - secBase, global: false}
 
-		case ".equ":
-			fmt.Println("do the equ shi")
+		case ".equ": //only for instruction length sized stuff
+			//don't need to populate .equ since it doesn't matter what section or address it is at
+			valueTable[str_slice[1]] = handle_equ(str_slice[2])
+
 		case ".section":
-			fmt.Println("specifics for section")
+			*section = str_slice[1]
+			sectionTable[str_slice[1]] = &Section{name: str_slice[1], addr: addr, sz: 0}
+			addr += ILEN_BYTES
+
 		case ".text", ".data", ".bss", ".rodata":
-			fmt.Println("do the section shi")
+			*section = str_slice[0]
+			sectionTable[str_slice[0]] = &Section{name: str_slice[0], addr: addr, sz: 0}
+			addr += ILEN_BYTES
+
+		case ".asciz":
+			str_sz := ilen(len(str_slice[1]) + 1) //in bytes including /0
+			sec := sectionTable[*section]
+			sec.sz += ilen(str_sz)
+			addr += align_addr(ilen(str_sz)) //increases address by aligned amount
+
+		case ".half": // 16 bit words
+			words := strings.Split(str_slice[1], ",")
+			word_sz := ilen(len(words)) * ILEN_BYTES / 4
+			sec := sectionTable[*section]
+			sec.sz += word_sz
+			addr += align_addr(word_sz)
+
+		case ".word": // 32 bit words
+			words := strings.Split(str_slice[1], ",")
+			word_sz := ilen(len(words)) * ILEN_BYTES / 2
+			sec := sectionTable[*section]
+			sec.sz += word_sz
+			addr += align_addr(word_sz)
+
+		case ".dword": // 64 bit words
+			words := strings.Split(str_slice[1], ",")
+			word_sz := ilen(len(words)) * ILEN_BYTES
+			sec := sectionTable[*section]
+			sec.sz += word_sz
+			addr += align_addr(word_sz)
+
 		default:
 			log.Fatal("unknown assembler directive!")
 		}
@@ -115,16 +168,17 @@ func ParseLine(line string, prev_addr ilen, section *string) (ilen, ilen, error)
 		//default is .text
 		if *section == "" {
 			*section = ".text"
-			sectionTable[*section] = Section{name: "text", addr: addr, sz: 0}
+			sectionTable[*section] = &Section{name: ".text", addr: addr, sz: 0}
 		}
 
 		//is label
 		if strings.HasSuffix(str_slice[0], ":") {
 			str_slice[0] = strings.TrimSuffix(str_slice[0], ":")
-			symbolTable[str_slice[0]] = Symbol{name: str_slice[0], addr: addr, global: false}
+			symbolTable[str_slice[0]] = Symbol{section: sectionTable[*section], name: str_slice[0], offset: addr, global: false}
 			return 0, addr, nil
 		}
 
+		// eventually add functionality to account for when the immediate is too big
 		itype := InstrTable[str_slice[0]]
 		instruction := ilen(0x000000000)
 		switch itype.fmt {
@@ -163,7 +217,33 @@ func ParseLine(line string, prev_addr ilen, section *string) (ilen, ilen, error)
 			instruction |= ilen(rs1) << 15
 			instruction |= ilen(immediate) << 20
 			fmt.Printf("%032b\n", instruction)
-		// case S: // store: rs2, offset(rs1)
+
+		case S: // store: rs2, offset(rs1)
+			open := strings.Index(str_slice[2], "(")
+			close := strings.Index(str_slice[2], ")")
+			if open < 0 || close < 0 || close <= open {
+				return 0, 0, errors.New("invalid format, expected imm(reg)")
+			}
+			imm := str_slice[2][:open]
+			reg := str_slice[2][open+1 : close]
+			immediate, err := strconv.Atoi(imm)
+			if err != nil {
+				log.Fatal(err)
+			}
+			first_imm := immediate & 0b11111
+			sec_imm := immediate & 0b11111110000
+
+			rs1, inRs1 := regMap[reg]
+			rs2, inRs2 := regMap[str_slice[3]]
+			if !inRs1 || !inRs2 {
+				return 0, addr, errors.New("invalid registers")
+			}
+			instruction |= ilen(itype.Opcode)
+			instruction |= ilen(first_imm) << 7
+			instruction |= ilen(itype.funct3) << 12
+			instruction |= ilen(rs1) << 15
+			instruction |= ilen(rs2) << 20
+			instruction |= ilen(sec_imm) << 25
 
 		// case B: // branch: rs1, rs2, label
 
@@ -176,7 +256,17 @@ func ParseLine(line string, prev_addr ilen, section *string) (ilen, ilen, error)
 		default:
 			log.Fatalf("unsupported instruction format %q", itype.fmt)
 		}
+		addr += ILEN_BYTES
 		return ilen(instruction), addr, nil
 
 	} // Instruction & labels
+}
+
+func handle_equ(expression string) ilen {
+	return 0
+}
+
+// rounds v up to instruction length
+func align_addr(v ilen) ilen {
+	return (v + (ILEN_BYTES - 1)) &^ (ILEN_BYTES - 1)
 }
