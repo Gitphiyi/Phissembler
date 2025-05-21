@@ -4,6 +4,7 @@ import "fmt"
 
 type ilen uint64 //instruction length
 const ILEN_BYTES ilen = 8
+const BYTE_SZ ilen = 8 //bits per byte
 
 type Section struct {
 	name string

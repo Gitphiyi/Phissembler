@@ -11,17 +11,23 @@ import (
 	"strings"
 )
 
-var symbolTable = make(map[string]Symbol) //symbol mapping
+var symbolTable = make(map[string]*Symbol) //symbol mapping
 var valueTable = make(map[string]ilen)
 var sectionTable = make(map[string]*Section)
+var quoted = regexp.MustCompile(`"([^"\\]*(\\.[^"\\]*)*)"`)
 
 func Print_Info() {
 	fmt.Println("All .equ values: ")
 	for key, val := range valueTable {
-		fmt.Printf("\t %s: %d\n", key, val)
+		fmt.Printf("  %s: %d\n", key, val)
 	}
 	for key, val := range sectionTable {
 		fmt.Printf("Section: %s (addr, sz) = (0x%X, %d bytes)\n", key, val.addr, val.sz)
+		for _, val := range symbolTable {
+			if val.section.name == key {
+				fmt.Printf("  (%s) offset from section: 0x%X\n", val.name, val.offset)
+			}
+		}
 	}
 }
 
@@ -72,9 +78,8 @@ func SecondPass(instructions []string) {
 }
 
 // cleans every line of code getting rid of comments and ensuring everything is in the correct format. Returns (instruction, addr, error)
-func FirstPassLine(line string, prev_addr ilen, section *string) (ilen, error) {
-	fmt.Println(line)
-	var addr = prev_addr
+func FirstPassLine(line string, curr_addr ilen, section *string) (ilen, error) {
+	var next_addr = curr_addr
 	var str_slice = strings.SplitAfterN(line, " ", 5)
 
 	str_slice[0] = strings.TrimSpace(strings.ToLower(str_slice[0]))
@@ -86,7 +91,7 @@ func FirstPassLine(line string, prev_addr ilen, section *string) (ilen, error) {
 				str_slice[3] = strings.TrimSpace(str_slice[3]) //Risc-V can have at most 3 operands so trim comma off of them if possible
 				//Checks if there are any more arguments and return error. 4th index can only be comments
 				if len(str_slice) > 4 && str_slice[4][0] != '#' {
-					return addr, errors.New("extra arguments given")
+					return next_addr, errors.New("extra arguments given")
 				}
 			}
 		}
@@ -100,37 +105,39 @@ func FirstPassLine(line string, prev_addr ilen, section *string) (ilen, error) {
 			if err != nil {
 				log.Fatal("immediate given is not decimal, hex, nor binary")
 			}
-			addr = ilen(val)
+			next_addr = ilen(val)
 
 		case ".align": //align to specified boundary
 			if *section == "" {
 				*section = ".text"
-				sectionTable[*section] = &Section{name: ".text", addr: addr, sz: 0}
+				sectionTable[*section] = &Section{name: ".text", addr: curr_addr, sz: 0}
 			}
-			pow, err := strconv.ParseUint(str_slice[1], 0, 32)
+			alignment, err := strconv.ParseUint(str_slice[1], 0, 32)
 			if err != nil {
 				log.Fatal("immediate given is not decimal, hex, nor binary")
 			}
-			remainder := ilen(2^pow) - (addr % ilen(2^pow))
-			addr += remainder //aligns address
+			byte_align := alignment / uint64(BYTE_SZ)
+			remainder := ilen(byte_align) - (curr_addr % ilen(byte_align))
+			next_addr += remainder //aligns address
 			sec := sectionTable[*section]
 			sec.sz += remainder
 
 		case ".globl":
 			if *section == "" {
 				*section = ".text"
-				sectionTable[*section] = &Section{name: ".text", addr: addr, sz: 0}
+				sectionTable[*section] = &Section{name: ".text", addr: curr_addr, sz: 0}
 			}
+
 			secBase := sectionTable[*section].addr
-			symbolTable[str_slice[1]] = Symbol{section: sectionTable[*section], name: str_slice[1], offset: addr - secBase, global: true}
+			symbolTable[str_slice[1]] = &Symbol{section: sectionTable[*section], name: str_slice[1], offset: curr_addr - secBase, global: true}
 
 		case ".local":
 			if *section == "" {
 				*section = ".text"
-				sectionTable[*section] = &Section{name: ".text", addr: addr, sz: 0}
+				sectionTable[*section] = &Section{name: ".text", addr: curr_addr, sz: 0}
 			}
 			secBase := sectionTable[*section].addr
-			symbolTable[str_slice[1]] = Symbol{section: sectionTable[*section], name: str_slice[1], offset: addr - secBase, global: false}
+			symbolTable[str_slice[1]] = &Symbol{section: sectionTable[*section], name: str_slice[1], offset: curr_addr - secBase, global: false}
 
 		case ".equ": //only for instruction length sized stuff
 			//don't need to populate .equ since it doesn't matter what section or address it is at
@@ -138,65 +145,87 @@ func FirstPassLine(line string, prev_addr ilen, section *string) (ilen, error) {
 
 		case ".section":
 			*section = str_slice[1]
-			sectionTable[str_slice[1]] = &Section{name: str_slice[1], addr: addr, sz: 0}
-			addr += ILEN_BYTES
+			sectionTable[str_slice[1]] = &Section{name: str_slice[1], addr: curr_addr, sz: 0}
+			//next_addr += ILEN_BYTES
 
 		case ".text", ".data", ".bss", ".rodata":
 			*section = str_slice[0]
-			sectionTable[str_slice[0]] = &Section{name: str_slice[0], addr: addr, sz: 0}
-			addr += ILEN_BYTES
+			sectionTable[str_slice[0]] = &Section{name: str_slice[0], addr: curr_addr, sz: 0}
+			//next_addr += ILEN_BYTES
 
 		case ".asciz":
-			str_sz := ilen(len(str_slice[1]) + 1) //in bytes including /0
+			asciz, err := strconv.Unquote(quoted.FindString(line))
+			if err != nil {
+				log.Fatalf("unquoting asciz failed")
+			}
+			str_sz := ilen(len(asciz) + 1) //in bytes including /0
 			sec := sectionTable[*section]
-			sec.sz += ilen(str_sz)
-			addr += align_addr(ilen(str_sz)) //increases address by aligned amount
+			sec.sz += align_addr(ilen(str_sz))
+			next_addr += align_addr(ilen(str_sz)) //increases address by aligned amount
 
 		case ".zero":
-			zero_sz := ilen(len(str_slice[1]))
+			zero_sz, err := strconv.Atoi(str_slice[1])
+			if err != nil {
+				log.Fatalf("atoi .zero failed")
+			}
 			sec := sectionTable[*section]
 			sec.sz += ilen(zero_sz)
-			addr += align_addr(ilen(zero_sz))
+			next_addr += align_addr(ilen(zero_sz))
 
 		case ".half": // 16 bit words
-			words := strings.Split(str_slice[1], ",")
+			words := strings.Split(line[5:], ",")
 			word_sz := ilen(len(words)) * ILEN_BYTES / 4
 			sec := sectionTable[*section]
 			sec.sz += word_sz
-			addr += align_addr(word_sz)
+			next_addr += word_sz
 
 		case ".word": // 32 bit words
-			words := strings.Split(str_slice[1], ",")
+			words := strings.Split(line[5:], ",")
 			word_sz := ilen(len(words)) * ILEN_BYTES / 2
 			sec := sectionTable[*section]
 			sec.sz += word_sz
-			addr += align_addr(word_sz)
+			next_addr += align_addr(word_sz)
 
 		case ".dword": // 64 bit words
-			words := strings.Split(str_slice[1], ",")
+			words := strings.Split(line[6:], ",")
 			word_sz := ilen(len(words)) * ILEN_BYTES
 			sec := sectionTable[*section]
 			sec.sz += word_sz
-			addr += align_addr(word_sz)
+			next_addr += align_addr(word_sz)
 
 		default:
 			log.Fatal("unknown assembler directive!")
 		}
-		return addr, nil
+		fmt.Printf("(0x%X) %s\n", curr_addr, line)
+		return next_addr, nil
 	} else {
 		//default is .text
 		if *section == "" {
 			*section = ".text"
-			sectionTable[*section] = &Section{name: ".text", addr: addr, sz: 0}
+			sectionTable[*section] = &Section{name: ".text", addr: curr_addr, sz: 0}
 		}
 		sec := sectionTable[*section]
 		//is label
 		if strings.HasSuffix(str_slice[0], ":") {
 			str_slice[0] = strings.TrimSuffix(str_slice[0], ":")
-			symbolTable[str_slice[0]] = Symbol{section: sectionTable[*section], name: str_slice[0], offset: addr, global: false}
+			symbol, ok := symbolTable[str_slice[0]]
+			if ok {
+				symbol.offset = curr_addr - sec.addr
+			} else {
+				symbolTable[str_slice[0]] = &Symbol{section: sectionTable[*section], name: str_slice[0], offset: curr_addr - sec.addr, global: false}
+			}
+
+		} else {
+			//is instruction
+			if *section != ".text" {
+				fmt.Printf("section is %s\n", *section)
+				return 0, errors.New("instructions must be in text")
+			}
 		}
+		next_addr += ILEN_BYTES
 		sec.sz += ILEN_BYTES
-		return addr, nil
+		fmt.Printf("(0x%X) %s\n", curr_addr, line)
+		return next_addr, nil
 	} // Instruction & labels
 }
 
