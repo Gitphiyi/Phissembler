@@ -2,8 +2,10 @@ package assembler
 
 import (
 	"bufio"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"regexp"
@@ -12,10 +14,38 @@ import (
 )
 
 var symbolTable = make(map[string]*Symbol) //symbol mapping
-var valueTable = make(map[string]ilen)
+var valueTable = make(map[string]ilen)     //for equ
 var sectionTable = make(map[string]*Section)
+var instr_addresses = make([]ilen, 0, 10)
 var quoted = regexp.MustCompile(`"([^"\\]*(\\.[^"\\]*)*)"`)
 
+func Print_Bin(filename string) {
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("error reading bin")
+	}
+	buf := make([]byte, 1)
+	//offset := 0
+	cnt := 0
+	for {
+		_, err := file.Read(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalln("failed to load byte")
+		}
+		if cnt%30 == 0 {
+			fmt.Println()
+		}
+		cnt++
+		//fmt.Printf("%08b ", buf[0])
+		fmt.Printf("%02X ", buf[0])
+	}
+	fmt.Printf("\n# of bytes = %d\n", cnt)
+	defer file.Close()
+
+}
 func Print_Info() {
 	fmt.Println("All .equ values: ")
 	for key, val := range valueTable {
@@ -48,6 +78,10 @@ func ParseFile(filename string) []string {
 		if line == "" || (len(line) >= 1 && line[0:1] == "#") {
 			continue
 		}
+		// Remove comments, if any
+		if idx := strings.Index(line, "#"); idx != -1 {
+			line = line[:idx]
+		}
 		lines = append(lines, line)
 	}
 	if err := scanner.Err(); err != nil {
@@ -56,63 +90,63 @@ func ParseFile(filename string) []string {
 	return lines
 }
 
-// Loop through every directve/instruction. Record which section each one is in and the offset address it is in each respective section
-func FirstPass(instructions []string) {
+// Loop through every directve/instruction. Record which section each one is in and the offset address it is in each respective section. Returns binary file size
+func FirstPass(instructions []string) ilen {
 	var section = ""
 	var addr ilen = 0x0
 
 	for i := 0; i < len(instructions); i++ {
+		instr_addresses = append(instr_addresses, addr)
 		new_addr, err := FirstPassLine(instructions[i], ilen(addr), &section)
 		if err != nil {
 			log.Fatal(err)
 		}
 		addr = new_addr
 	}
+	return addr
 }
 
 // loop through every instruction and plug in addresses of .words, .dword, .equ etc into instructions. Fill in actual value into memory for .words and such
-func SecondPass(instructions []string) {
-	for i := 0; i < len(instructions); i++ {
+func SecondPass(instructions []string, bin_sz ilen) {
+	fmt.Printf("\n Second pass starting: \n\n")
+	bin_file, err := os.Create("assembly.bin")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer bin_file.Close()
 
+	var section = ""
+	var byte_arr = make([]byte, bin_sz)
+	for i := 0; i < len(instructions); i++ {
+		BinGenerationLine(i, byte_arr, instructions[i], &section)
+	}
+	err = binary.Write(bin_file, binary.LittleEndian, byte_arr)
+	if err != nil {
+		log.Fatalf("could not write to binary file")
 	}
 }
 
 // cleans every line of code getting rid of comments and ensuring everything is in the correct format. Returns (instruction, addr, error)
 func FirstPassLine(line string, curr_addr ilen, section *string) (ilen, error) {
 	var next_addr = curr_addr
-	var str_slice = strings.SplitAfterN(line, " ", 5)
-
-	str_slice[0] = strings.TrimSpace(strings.ToLower(str_slice[0]))
-	if len(str_slice) > 1 && str_slice[1][0] != '#' {
-		str_slice[1] = strings.TrimSuffix(strings.TrimSpace(str_slice[1]), ",")
-		if len(str_slice) > 2 && str_slice[2][0] != '#' {
-			str_slice[2] = strings.TrimSuffix(strings.TrimSpace(str_slice[2]), ",")
-			if len(str_slice) > 3 && str_slice[3][0] != '#' {
-				str_slice[3] = strings.TrimSpace(str_slice[3]) //Risc-V can have at most 3 operands so trim comma off of them if possible
-				//Checks if there are any more arguments and return error. 4th index can only be comments
-				if len(str_slice) > 4 && str_slice[4][0] != '#' {
-					return next_addr, errors.New("extra arguments given")
-				}
-			}
-		}
-	}
-
+	var op_split = strings.SplitN(line, " ", 2)
 	//line is a directive
 	if line[0] == '.' {
-		switch str_slice[0] {
+		switch op_split[0] {
 		case ".org": //set location counter to absolute offset line[1]
-			val, err := strconv.ParseUint(str_slice[1], 0, 32)
+			val, err := strconv.ParseUint(strings.TrimSpace(op_split[1]), 0, 32)
 			if err != nil {
 				log.Fatal("immediate given is not decimal, hex, nor binary")
 			}
-			next_addr = ilen(val)
+			sz := align_size(reg(val), 4)
+			next_addr = ilen(sz)
 
 		case ".align": //align to specified boundary
 			if *section == "" {
 				*section = ".text"
 				sectionTable[*section] = &Section{name: ".text", addr: curr_addr, sz: 0}
 			}
-			alignment, err := strconv.ParseUint(str_slice[1], 0, 32)
+			alignment, err := strconv.ParseUint(strings.TrimSpace(op_split[1]), 0, 32)
 			if err != nil {
 				log.Fatal("immediate given is not decimal, hex, nor binary")
 			}
@@ -129,7 +163,7 @@ func FirstPassLine(line string, curr_addr ilen, section *string) (ilen, error) {
 			}
 
 			secBase := sectionTable[*section].addr
-			symbolTable[str_slice[1]] = &Symbol{section: sectionTable[*section], name: str_slice[1], offset: curr_addr - secBase, global: true}
+			symbolTable[op_split[1]] = &Symbol{section: sectionTable[*section], name: op_split[1], offset: curr_addr - secBase, global: true}
 
 		case ".local":
 			if *section == "" {
@@ -137,20 +171,21 @@ func FirstPassLine(line string, curr_addr ilen, section *string) (ilen, error) {
 				sectionTable[*section] = &Section{name: ".text", addr: curr_addr, sz: 0}
 			}
 			secBase := sectionTable[*section].addr
-			symbolTable[str_slice[1]] = &Symbol{section: sectionTable[*section], name: str_slice[1], offset: curr_addr - secBase, global: false}
+			symbolTable[op_split[1]] = &Symbol{section: sectionTable[*section], name: op_split[1], offset: curr_addr - secBase, global: false}
 
 		case ".equ": //only for instruction length sized stuff
 			//don't need to populate .equ since it doesn't matter what section or address it is at
-			valueTable[str_slice[1]] = handle_equ(str_slice[2])
+			args := strings.SplitN(op_split[1], ",", 2)
+			valueTable[args[0]] = handle_equ(strings.TrimSpace(args[1]))
 
 		case ".section":
-			*section = str_slice[1]
-			sectionTable[str_slice[1]] = &Section{name: str_slice[1], addr: curr_addr, sz: 0}
+			*section = op_split[1]
+			sectionTable[op_split[1]] = &Section{name: op_split[1], addr: curr_addr, sz: 0}
 			//next_addr += ILEN_BYTES
 
 		case ".text", ".data", ".bss", ".rodata":
-			*section = str_slice[0]
-			sectionTable[str_slice[0]] = &Section{name: str_slice[0], addr: curr_addr, sz: 0}
+			*section = op_split[0]
+			sectionTable[op_split[0]] = &Section{name: op_split[0], addr: curr_addr, sz: 0}
 			//next_addr += ILEN_BYTES
 
 		case ".asciz":
@@ -164,7 +199,7 @@ func FirstPassLine(line string, curr_addr ilen, section *string) (ilen, error) {
 			next_addr += align_addr(ilen(str_sz)) //increases address by aligned amount
 
 		case ".zero":
-			zero_sz, err := strconv.Atoi(str_slice[1])
+			zero_sz, err := strconv.Atoi(strings.TrimSpace(op_split[1]))
 			if err != nil {
 				log.Fatalf("atoi .zero failed")
 			}
@@ -174,21 +209,21 @@ func FirstPassLine(line string, curr_addr ilen, section *string) (ilen, error) {
 
 		case ".half": // 16 bit words
 			words := strings.Split(line[5:], ",")
-			word_sz := ilen(len(words)) * ILEN_BYTES / 4
+			word_sz := ilen(len(words)) * 2
 			sec := sectionTable[*section]
 			sec.sz += word_sz
 			next_addr += word_sz
 
 		case ".word": // 32 bit words
 			words := strings.Split(line[5:], ",")
-			word_sz := ilen(len(words)) * ILEN_BYTES / 2
+			word_sz := ilen(len(words)) * 4
 			sec := sectionTable[*section]
 			sec.sz += word_sz
 			next_addr += align_addr(word_sz)
 
 		case ".dword": // 64 bit words
 			words := strings.Split(line[6:], ",")
-			word_sz := ilen(len(words)) * ILEN_BYTES
+			word_sz := ilen(len(words)) * 8
 			sec := sectionTable[*section]
 			sec.sz += word_sz
 			next_addr += align_addr(word_sz)
@@ -206,13 +241,13 @@ func FirstPassLine(line string, curr_addr ilen, section *string) (ilen, error) {
 		}
 		sec := sectionTable[*section]
 		//is label
-		if strings.HasSuffix(str_slice[0], ":") {
-			str_slice[0] = strings.TrimSuffix(str_slice[0], ":")
-			symbol, ok := symbolTable[str_slice[0]]
+		if strings.HasSuffix(op_split[0], ":") {
+			op_split[0] = strings.TrimSuffix(op_split[0], ":")
+			symbol, ok := symbolTable[op_split[0]]
 			if ok {
 				symbol.offset = curr_addr - sec.addr
 			} else {
-				symbolTable[str_slice[0]] = &Symbol{section: sectionTable[*section], name: str_slice[0], offset: curr_addr - sec.addr, global: false}
+				symbolTable[op_split[0]] = &Symbol{section: sectionTable[*section], name: op_split[0], offset: curr_addr - sec.addr, global: false}
 			}
 
 		} else {
@@ -221,117 +256,235 @@ func FirstPassLine(line string, curr_addr ilen, section *string) (ilen, error) {
 				fmt.Printf("section is %s\n", *section)
 				return 0, errors.New("instructions must be in text")
 			}
+			next_addr += ILEN_BYTES
+			sec.sz += ILEN_BYTES
 		}
-		next_addr += ILEN_BYTES
-		sec.sz += ILEN_BYTES
 		fmt.Printf("(0x%X) %s\n", curr_addr, line)
 		return next_addr, nil
 	} // Instruction & labels
 }
 
-// func SecondPassLine(line string, prev_addr ilen, section *string) {
-// 	fmt.Println(line)
-// 	var addr = prev_addr
-// 	var str_slice = strings.SplitAfterN(line, " ", 5)
+func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *string) (ilen, error) {
+	//default is .text
+	if *section == "" {
+		*section = ".text"
+		sectionTable[*section] = &Section{name: ".text", addr: instr_addresses[curr_idx], sz: 0}
+	}
 
-// 	str_slice[0] = strings.TrimSpace(strings.ToLower(str_slice[0]))
-// 	str_slice[1] = strings.TrimSuffix(strings.TrimSpace(str_slice[1]), ",")
-// 	str_slice[2] = strings.TrimSuffix(strings.TrimSpace(str_slice[2]), ",")
-// 	if len(str_slice) > 3 {
-// 		str_slice[3] = strings.TrimSpace(str_slice[3]) //Risc-V can have at most 3 operands so trim comma off of them if possible
-// 	}
-// 	//Checks if there are any more arguments and return error. 4th index can only be comments
-// 	if len(str_slice) > 4 && len(str_slice[4]) > 0 && str_slice[4][0] != '#' {
-// 		return 0, addr, errors.New("extra arguments given")
-// 	}
-// 	// eventually add functionality to account for when the immediate is too big
-// 	itype := InstrTable[str_slice[0]]
-// 	instruction := ilen(0x000000000)
-// 	switch itype.fmt {
-// 	case R: // 3 operands: opcode, rd, funct3, rs1, rs2, funct7
-// 		rd, inRd := regMap[str_slice[1]]
-// 		rs1, inRs1 := regMap[str_slice[2]]
-// 		rs2, inRs2 := regMap[str_slice[3]]
-// 		if !inRd || !inRs1 || !inRs2 {
-// 			return 0, addr, errors.New("invalid registers")
-// 		}
-// 		instruction |= ilen(itype.Opcode)
-// 		instruction |= ilen(rd) << 7
-// 		instruction |= ilen(itype.funct3) << 12
-// 		instruction |= ilen(rs1) << 15
-// 		instruction |= ilen(rs2) << 20
-// 		//fmt.Printf("%032b\n", instruction)
-// 	case I: // immediate / loads / jalr: rd, rs1, imm  OR  lw rd, offset(rs1)
-// 		rd, inRd := regMap[str_slice[1]]
-// 		rs1, inRs1 := regMap[str_slice[2]]
-// 		immediate, err := strconv.Atoi(str_slice[3])
-// 		if err != nil {
-// 			log.Fatal(err)
-// 		}
-// 		if str_slice[0] == "ssli" || str_slice[0] == "srli" || str_slice[0] == "srai" {
-// 			immediate &= 0x1F
-// 			if str_slice[0] == "srai" {
-// 				immediate |= 0x20 << 5
-// 			}
-// 		}
-// 		if !inRd || !inRs1 {
-// 			return 0, addr, errors.New("invalid registers")
-// 		}
-// 		instruction |= ilen(itype.Opcode)
-// 		instruction |= ilen(rd) << 7
-// 		instruction |= ilen(itype.funct3) << 12
-// 		instruction |= ilen(rs1) << 15
-// 		instruction |= ilen(immediate) << 20
-// 		fmt.Printf("%032b\n", instruction)
+	var next_addr = instr_addresses[curr_idx]
+	var op_split = strings.SplitN(line, " ", 2)
 
-// 	case S: // store: rs2, offset(rs1)
-// 		open := strings.Index(str_slice[2], "(")
-// 		close := strings.Index(str_slice[2], ")")
-// 		if open < 0 || close < 0 || close <= open {
-// 			return 0, 0, errors.New("invalid format, expected imm(reg)")
-// 		}
-// 		imm := str_slice[2][:open]
-// 		reg := str_slice[2][open+1 : close]
-// 		immediate, err := strconv.Atoi(imm)
-// 		if err != nil {
-// 			log.Fatal(err)
-// 		}
-// 		first_imm := immediate & 0b11111
-// 		sec_imm := immediate & 0b11111110000
+	//line is a directive
+	if line[0] == '.' {
+		switch op_split[0] {
+		case ".org": //set location counter to absolute offset line[1]
+			//ignore if it is last instruction
+			if len(instr_addresses) == curr_idx+1 {
+				break
+			}
+			pad_size := instr_addresses[curr_idx+1] - instr_addresses[curr_idx]
+			targAddr := instr_addresses[curr_idx] + ilen(pad_size)
+			for i := instr_addresses[curr_idx]; i < targAddr; i += 4 {
+				if *section == ".text" {
+					bin_arr[i] = 0x13 // NOP instruction
+				} else {
+					bin_arr[i] = 0x00
+				}
+				bin_arr[i+1] = 0x00
+				bin_arr[i+2] = 0x00
+				bin_arr[i+3] = 0x00
+			}
+		case ".align": //align to specified boundary
+			//ignore if it is last instruction
+			if len(instr_addresses) == curr_idx+1 {
+				break
+			}
+			pad_size := instr_addresses[curr_idx+1] - instr_addresses[curr_idx]
+			targAddr := instr_addresses[curr_idx] + ilen(pad_size)
+			for i := instr_addresses[curr_idx]; i < targAddr; i += 1 {
+				if *section == ".text" {
+					bin_arr[i] = 0x13 // NOP instruction
+				} else {
+					bin_arr[i] = 0x00
+				}
+			}
+		case ".globl", ".local", ".equ", ".zero":
+			break
+		case ".section":
+			*section = op_split[1]
+		case ".text", ".data", ".bss", ".rodata":
+			*section = op_split[0]
+		case ".asciz":
+			asciz, err := strconv.Unquote(quoted.FindString(line))
+			if err != nil {
+				log.Fatalf("unquoting asciz failed")
+			}
+			i := instr_addresses[curr_idx]
+			for ; i < instr_addresses[curr_idx]+ilen(len(asciz)); i++ {
+				bin_arr[i] = asciz[i-instr_addresses[curr_idx]]
+			}
+			bin_arr[i] = 0 //automatic terminator
+		case ".half": // 16 bit words
+			words := strings.Split(op_split[1], ",")
+			i := instr_addresses[curr_idx]
+			cnt := 0
+			for ; i < instr_addresses[curr_idx]+ilen(2*len(words)); i += 2 {
+				num, err := strconv.ParseUint(strings.TrimSpace(words[cnt]), 0, 16)
+				if err != nil {
+					fmt.Println(err)
+					log.Fatalf("converted half word to integer failure") //autmatically checks bounds
+				}
+				bin_arr[i] = byte((num & 0xFF00) >> 8)
+				bin_arr[i+1] = byte(num & 0xFF)
+				//fmt.Printf("num = 0x%02X \t 0x%02X\t 0x%02X \n", num, bin_arr[i], bin_arr[i+1])
+				cnt++
+			}
 
-// 		rs1, inRs1 := regMap[reg]
-// 		rs2, inRs2 := regMap[str_slice[3]]
-// 		if !inRs1 || !inRs2 {
-// 			return 0, addr, errors.New("invalid registers")
-// 		}
-// 		instruction |= ilen(itype.Opcode)
-// 		instruction |= ilen(first_imm) << 7
-// 		instruction |= ilen(itype.funct3) << 12
-// 		instruction |= ilen(rs1) << 15
-// 		instruction |= ilen(rs2) << 20
-// 		instruction |= ilen(sec_imm) << 25
+		case ".word": // 32 bit words
+			words := strings.Split(op_split[1], ",")
+			i := instr_addresses[curr_idx]
+			cnt := 0
+			for ; i < instr_addresses[curr_idx]+ilen(4*len(words)); i += 4 {
+				num, err := strconv.ParseUint(strings.TrimSpace(words[cnt]), 0, 32)
+				if err != nil {
+					fmt.Println(err)
+					log.Fatalf("converted word to integer failure") //autmatically checks bounds
+				}
+				bin_arr[i] = byte((num & 0xFF000000) >> 24)
+				bin_arr[i+1] = byte((num & 0xFF0000) >> 16)
+				bin_arr[i+2] = byte((num & 0xFF00) >> 8)
+				bin_arr[i+3] = byte(num & 0xFF)
+				//fmt.Printf("num = 0x%02X \t 0x%02X\t 0x%02X \t 0x%02X\t 0x%02X \n", num, bin_arr[i], bin_arr[i+1], bin_arr[i+2], bin_arr[i+3])
+				cnt++
+			}
 
-// 	// case B: // branch: rs1, rs2, label
+		case ".dword": // 64 bit words
+			words := strings.Split(op_split[1], ",")
+			i := instr_addresses[curr_idx]
+			cnt := 0
+			for ; i < instr_addresses[curr_idx]+ilen(8*len(words)); i += 8 {
+				num, err := strconv.ParseUint(strings.TrimSpace(words[cnt]), 0, 64)
+				if err != nil {
+					fmt.Println(err)
+					log.Fatalf("converted word to integer failure") //autmatically checks bounds
+				}
+				bin_arr[i] = byte((num & 0xFF00000000000000) >> 56)
+				bin_arr[i+1] = byte((num & 0xFF000000000000) >> 48)
+				bin_arr[i+2] = byte((num & 0xFF0000000000) >> 40)
+				bin_arr[i+3] = byte(num & 0xFF00000000 >> 32)
+				bin_arr[i+4] = byte((num & 0xFF000000) >> 24)
+				bin_arr[i+5] = byte((num & 0xFF0000) >> 16)
+				bin_arr[i+6] = byte((num & 0xFF00) >> 8)
+				bin_arr[i+7] = byte(num & 0xFF)
+				//fmt.Printf("num = 0x%02X \t 0x%02X\t 0x%02X \t 0x%02X\t 0x%02X \n", num, bin_arr[i], bin_arr[i+1], bin_arr[i+2], bin_arr[i+3])
+				cnt++
+			}
+		default:
+			log.Fatal("unknown assembler directive!")
+		}
+		fmt.Printf("(0x%X) %s\n", instr_addresses[curr_idx], line)
+		return next_addr, nil
+	} else {
+		//sec := sectionTable[*section]
+		return next_addr, nil
+	} // Instruction & labels
+	// eventually add functionality to account for when the immediate is too big
+	// itype := InstrTable[str_slice[0]]
+	// instruction := ilen(0x000000000)
+	// switch itype.fmt {
+	// case R: // 3 operands: opcode, rd, funct3, rs1, rs2, funct7
+	// 	rd, inRd := regMap[str_slice[1]]
+	// 	rs1, inRs1 := regMap[str_slice[2]]
+	// 	rs2, inRs2 := regMap[str_slice[3]]
+	// 	if !inRd || !inRs1 || !inRs2 {
+	// 		return 0, addr, errors.New("invalid registers")
+	// 	}
+	// 	instruction |= ilen(itype.Opcode)
+	// 	instruction |= ilen(rd) << 7
+	// 	instruction |= ilen(itype.funct3) << 12
+	// 	instruction |= ilen(rs1) << 15
+	// 	instruction |= ilen(rs2) << 20
+	// 	//fmt.Printf("%032b\n", instruction)
+	// case I: // immediate / loads / jalr: rd, rs1, imm  OR  lw rd, offset(rs1)
+	// 	rd, inRd := regMap[str_slice[1]]
+	// 	rs1, inRs1 := regMap[str_slice[2]]
+	// 	immediate, err := strconv.Atoi(str_slice[3])
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	if str_slice[0] == "ssli" || str_slice[0] == "srli" || str_slice[0] == "srai" {
+	// 		immediate &= 0x1F
+	// 		if str_slice[0] == "srai" {
+	// 			immediate |= 0x20 << 5
+	// 		}
+	// 	}
+	// 	if !inRd || !inRs1 {
+	// 		return 0, addr, errors.New("invalid registers")
+	// 	}
+	// 	instruction |= ilen(itype.Opcode)
+	// 	instruction |= ilen(rd) << 7
+	// 	instruction |= ilen(itype.funct3) << 12
+	// 	instruction |= ilen(rs1) << 15
+	// 	instruction |= ilen(immediate) << 20
+	// 	fmt.Printf("%032b\n", instruction)
 
-// 	// case U: // upper-immediate: rd, imm
+	// case S: // store: rs2, offset(rs1)
+	// 	open := strings.Index(str_slice[2], "(")
+	// 	close := strings.Index(str_slice[2], ")")
+	// 	if open < 0 || close < 0 || close <= open {
+	// 		return 0, 0, errors.New("invalid format, expected imm(reg)")
+	// 	}
+	// 	imm := str_slice[2][:open]
+	// 	reg := str_slice[2][open+1 : close]
+	// 	immediate, err := strconv.Atoi(imm)
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	first_imm := immediate & 0b11111
+	// 	sec_imm := immediate & 0b11111110000
 
-// 	// case J: // jump: rd, label
+	// 	rs1, inRs1 := regMap[reg]
+	// 	rs2, inRs2 := regMap[str_slice[3]]
+	// 	if !inRs1 || !inRs2 {
+	// 		return 0, addr, errors.New("invalid registers")
+	// 	}
+	// 	instruction |= ilen(itype.Opcode)
+	// 	instruction |= ilen(first_imm) << 7
+	// 	instruction |= ilen(itype.funct3) << 12
+	// 	instruction |= ilen(rs1) << 15
+	// 	instruction |= ilen(rs2) << 20
+	// 	instruction |= ilen(sec_imm) << 25
 
-// 	// case C:
+	// // case B: // branch: rs1, rs2, label
 
-// 	default:
-// 		log.Fatalf("unsupported instruction format %q", itype.fmt)
-// 	}
-// 	addr += ILEN_BYTES
-// 	return ilen(instruction), addr, nil
+	// // case U: // upper-immediate: rd, imm
 
-// }
+	// // case J: // jump: rd, label
+
+	// // case C:
+
+	// default:
+	// 	log.Fatalf("unsupported instruction format %q", itype.fmt)
+	// }
+	// addr += ILEN_BYTES
+	// return ilen(instruction), addr, nil
+
+}
 
 func handle_equ(expression string) ilen {
+	fmt.Printf("Expression inside equ: %s \n", expression)
 	return 0
 }
 
 // rounds v up to instruction length
 func align_addr(v ilen) ilen {
 	return (v + (ILEN_BYTES - 1)) &^ (ILEN_BYTES - 1)
+}
+
+// rounds v up to size param length
+func align_size(v reg, sz reg) reg {
+	if sz == 0 {
+		return v
+	}
+	return (v + (sz - 1)) &^ (sz - 1)
 }

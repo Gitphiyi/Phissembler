@@ -2,9 +2,12 @@ package assembler
 
 import "fmt"
 
-type ilen uint64 //instruction length
-const ILEN_BYTES ilen = 8
-const BYTE_SZ ilen = 8 //bits per byte
+type ilen uint32 // instruction length
+type reg uint64  // register size depending if it is rv64 or rv32
+
+const ILEN_BYTES ilen = 4
+const BYTE_SZ ilen = 8    //bits per byte
+const BASE_ADDR = 0x10000 //Base address where bin files are loaded to be executed
 
 type Section struct {
 	name string

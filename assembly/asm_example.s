@@ -1,4 +1,4 @@
-.org 0x40
+.org 0x38
 .text # 0x40 aligns to 0x50
 # rando
 .align 128 # 256 bits = 32 bytes
@@ -22,5 +22,9 @@ msg:
     .asciz "hi\n"
 zeros:
     .zero 20 # 20 bytes of zeros
+dword_check:
+.dword 0xFFDDEEAABBCCFFDD
 array:
-.word 0x3f800000, 0x3f800001, 0x3f800002 # 12 bytes
+.word 0x3F810024, 0x3D800001, 0x3f800002 # 12 bytes
+half:
+.half 0xFBFA, 18, 35
