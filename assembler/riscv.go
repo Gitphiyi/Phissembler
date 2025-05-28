@@ -90,11 +90,12 @@ func populate_instrTable() {
 	InstrTable["srai"] = InstrDesc{fmt: I, Opcode: uint8(I), funct3: 0x5, funct7: 0, ext: ExtNone}
 	InstrTable["slti"] = InstrDesc{fmt: I, Opcode: uint8(I), funct3: 0x2, funct7: 0, ext: ExtNone}
 	InstrTable["sltiu"] = InstrDesc{fmt: I, Opcode: uint8(I), funct3: 0x3, funct7: 0, ext: ExtNone}
-	InstrTable["lb"] = InstrDesc{fmt: I, Opcode: uint8(I), funct3: 0x0, funct7: 0, ext: ExtNone}
-	InstrTable["lh"] = InstrDesc{fmt: I, Opcode: uint8(I), funct3: 0x1, funct7: 0, ext: ExtNone}
-	InstrTable["lw"] = InstrDesc{fmt: I, Opcode: uint8(I), funct3: 0x2, funct7: 0, ext: ExtNone}
-	InstrTable["lbu"] = InstrDesc{fmt: I, Opcode: uint8(I), funct3: 0x4, funct7: 0, ext: ExtNone}
-	InstrTable["lhu"] = InstrDesc{fmt: I, Opcode: uint8(I), funct3: 0x5, funct7: 0, ext: ExtNone}
+
+	InstrTable["lb"] = InstrDesc{fmt: I, Opcode: 0b0000011, funct3: 0x0, funct7: 0, ext: ExtNone}
+	InstrTable["lh"] = InstrDesc{fmt: I, Opcode: 0b0000011, funct3: 0x1, funct7: 0, ext: ExtNone}
+	InstrTable["lw"] = InstrDesc{fmt: I, Opcode: 0b0000011, funct3: 0x2, funct7: 0, ext: ExtNone}
+	InstrTable["lbu"] = InstrDesc{fmt: I, Opcode: 0b0000011, funct3: 0x4, funct7: 0, ext: ExtNone}
+	InstrTable["lhu"] = InstrDesc{fmt: I, Opcode: 0b0000011, funct3: 0x5, funct7: 0, ext: ExtNone}
 	//S Instructions
 	InstrTable["sb"] = InstrDesc{fmt: S, Opcode: uint8(S), funct3: 0x0, funct7: 0, ext: ExtNone}
 	InstrTable["sh"] = InstrDesc{fmt: S, Opcode: uint8(S), funct3: 0x1, funct7: 0, ext: ExtNone}

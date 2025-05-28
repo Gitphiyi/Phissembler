@@ -7,15 +7,16 @@
 _start: 
     add t0, a0, a1 # R instruction test
     addi t1, a1, 1110 # I instruction test
+    jalr s0, 10(a2) # I instruction other format test
     sb t1, 10(a0) # S instruction test
     # tuff
 deez:
-    beq, t0, a2
+    beq t0, a2
+
 
 .section .feet
 wakanda:
     .asciz "dumb shi" # char is 1 byte. 
-
 .data # 8 + 8 + 8 + 20 + 8 + 12 = 64
 .equ fab, 123
 msg: 

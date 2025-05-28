@@ -80,7 +80,7 @@ func ParseFile(filename string) []string {
 		}
 		// Remove comments, if any
 		if idx := strings.Index(line, "#"); idx != -1 {
-			line = line[:idx]
+			line = strings.TrimSpace(line[:idx])
 		}
 		lines = append(lines, line)
 	}
@@ -384,51 +384,94 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 		}
 		fmt.Printf("(0x%X) %s\n", instr_addresses[curr_idx], line)
 		return next_addr, nil
-	} else {
-		//sec := sectionTable[*section]
-		return next_addr, nil
-	} // Instruction & labels
+	}
 	// eventually add functionality to account for when the immediate is too big
-	// itype := InstrTable[str_slice[0]]
-	// instruction := ilen(0x000000000)
-	// switch itype.fmt {
-	// case R: // 3 operands: opcode, rd, funct3, rs1, rs2, funct7
-	// 	rd, inRd := regMap[str_slice[1]]
-	// 	rs1, inRs1 := regMap[str_slice[2]]
-	// 	rs2, inRs2 := regMap[str_slice[3]]
-	// 	if !inRd || !inRs1 || !inRs2 {
-	// 		return 0, addr, errors.New("invalid registers")
-	// 	}
-	// 	instruction |= ilen(itype.Opcode)
-	// 	instruction |= ilen(rd) << 7
-	// 	instruction |= ilen(itype.funct3) << 12
-	// 	instruction |= ilen(rs1) << 15
-	// 	instruction |= ilen(rs2) << 20
-	// 	//fmt.Printf("%032b\n", instruction)
-	// case I: // immediate / loads / jalr: rd, rs1, imm  OR  lw rd, offset(rs1)
-	// 	rd, inRd := regMap[str_slice[1]]
-	// 	rs1, inRs1 := regMap[str_slice[2]]
-	// 	immediate, err := strconv.Atoi(str_slice[3])
-	// 	if err != nil {
-	// 		log.Fatal(err)
-	// 	}
-	// 	if str_slice[0] == "ssli" || str_slice[0] == "srli" || str_slice[0] == "srai" {
-	// 		immediate &= 0x1F
-	// 		if str_slice[0] == "srai" {
-	// 			immediate |= 0x20 << 5
-	// 		}
-	// 	}
-	// 	if !inRd || !inRs1 {
-	// 		return 0, addr, errors.New("invalid registers")
-	// 	}
-	// 	instruction |= ilen(itype.Opcode)
-	// 	instruction |= ilen(rd) << 7
-	// 	instruction |= ilen(itype.funct3) << 12
-	// 	instruction |= ilen(rs1) << 15
-	// 	instruction |= ilen(immediate) << 20
-	// 	fmt.Printf("%032b\n", instruction)
+	if strings.HasSuffix(op_split[0], ":") {
+		return next_addr, nil
+	} // is a label
+	itype := InstrTable[op_split[0]]
+	instruction := ilen(0x0)
+	switch itype.fmt {
+	case R: // 3 operands: opcode, rd, funct3, rs1, rs2, funct7
+		operands := strings.SplitN(op_split[1], ", ", 3)
+		rd, inRd := regMap[operands[0]]
+		rs1, inRs1 := regMap[operands[1]]
+		rs2, inRs2 := regMap[operands[2]]
+		if !inRd || !inRs1 || !inRs2 {
+			log.Fatalln("invalid registers")
+		}
+		instruction |= ilen(itype.Opcode)
+		instruction |= ilen(rd) << 7
+		instruction |= ilen(itype.funct3) << 12
+		instruction |= ilen(rs1) << 15
+		instruction |= ilen(rs2) << 20
+		populate_bin_instruction(instruction, instr_addresses[curr_idx], bin_arr)
+		fmt.Printf("R instr: %032b \n", instruction)
+	case I: // immediate / loads / jalr rd, rs1, imm  OR  lw rd, offset(rs1)
+		var operands = strings.SplitN(op_split[1], ", ", 3)
+		var rd, inRd = regMap[operands[0]]
+		var rs1 uint8
+		var inRs1 = true
+		var immediate ilen
 
-	// case S: // store: rs2, offset(rs1)
+		if len(operands) == 3 {
+			rs1, inRs1 = regMap[operands[1]]
+			if !inRd && !inRs1 {
+				log.Fatalln("invalid I registers")
+			}
+			val, err := strconv.Atoi(operands[2])
+			immediate = ilen(val)
+			if err != nil {
+				log.Fatalf("cannot convert val into immediate")
+			}
+		} else {
+			//first check if address is a number or a label
+			open := strings.Index(operands[1], "(")
+			close := strings.Index(operands[1], ")")
+			if open < 0 || close < 0 || close <= open {
+				log.Fatalln("invalid format, expected imm(reg)")
+			}
+			offset := operands[1][:open]
+			addr := operands[1][open+1 : close]
+
+			//check for equ
+			val, ok := valueTable[offset]
+			if ok {
+				immediate = val
+			} else {
+				val, err := strconv.Atoi(offset)
+				immediate = ilen(val)
+				if err != nil {
+					log.Fatalf("cannot convert val into immediate")
+				}
+			}
+			//check for label
+			label, ok := symbolTable[addr]
+			if ok {
+				rs1 = uint8(label.offset + label.section.addr)
+			} else {
+				rs1, inRs1 = regMap[addr]
+				if !inRd && !inRs1 {
+					log.Fatalln("invalid I registers")
+				}
+			}
+		} //immediate is an address
+		if op_split[0] == "ssli" || op_split[0] == "srli" || op_split[0] == "srai" {
+			immediate &= 0x1F
+			if op_split[0] == "srai" {
+				immediate |= 0x20 << 5
+			}
+		}
+		fmt.Printf("%07b %05b %03b %05b %012b \n", itype.Opcode, rd, itype.funct3, rs1, immediate)
+		instruction |= ilen(itype.Opcode)
+		instruction |= ilen(rd) << 7
+		instruction |= ilen(itype.funct3) << 12
+		instruction |= ilen(rs1) << 15       //000000001010 01100 000 01000 1100111
+		instruction |= ilen(immediate) << 20 //010001010110 01011 000 00110 0010011
+		populate_bin_instruction(instruction, instr_addresses[curr_idx], bin_arr)
+		fmt.Printf("I instr: %032b\n", instruction)
+
+	case S: // store: rs2, offset(rs1)
 	// 	open := strings.Index(str_slice[2], "(")
 	// 	close := strings.Index(str_slice[2], ")")
 	// 	if open < 0 || close < 0 || close <= open {
@@ -455,21 +498,17 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 	// 	instruction |= ilen(rs2) << 20
 	// 	instruction |= ilen(sec_imm) << 25
 
-	// // case B: // branch: rs1, rs2, label
+	case B: // branch: rs1, rs2, label
 
-	// // case U: // upper-immediate: rd, imm
+	case U: // upper-immediate: rd, imm
 
-	// // case J: // jump: rd, label
+	case J: // jump: rd, label
 
-	// // case C:
-
-	// default:
-	// 	log.Fatalf("unsupported instruction format %q", itype.fmt)
-	// }
-	// addr += ILEN_BYTES
-	// return ilen(instruction), addr, nil
-
-}
+	default:
+		log.Fatalf("unsupported instruction format %q", itype.fmt)
+	}
+	return next_addr, nil
+} // Instruction & labels
 
 func handle_equ(expression string) ilen {
 	fmt.Printf("Expression inside equ: %s \n", expression)
@@ -487,4 +526,13 @@ func align_size(v reg, sz reg) reg {
 		return v
 	}
 	return (v + (sz - 1)) &^ (sz - 1)
+}
+
+func populate_bin_instruction(instruction ilen, addr ilen, byte_arr []byte) {
+	for i := ilen(0); i < ILEN_BYTES; i++ {
+		ibyte := (instruction >> (8 * (ILEN_BYTES - i - 1))) & 0xFF
+		//fmt.Printf("%08b, ", ibyte)
+		byte_arr[addr+i] = byte(ibyte)
+	}
+	fmt.Println()
 }
