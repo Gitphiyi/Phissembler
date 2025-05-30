@@ -19,7 +19,7 @@ deez:
 
 .section .feet
 wakanda:
-    .asciz "dumb shi" # char is 1 byte. 
+    .asciz "testing with spaces" # char is 1 byte. 
 .data # 8 + 8 + 8 + 20 + 8 + 12 = 64
 .equ fab, 123
 msg: 
