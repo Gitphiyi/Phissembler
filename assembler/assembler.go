@@ -25,7 +25,6 @@ func Print_Bin(filename string) {
 		log.Fatalf("error reading bin")
 	}
 	buf := make([]byte, 1)
-	//offset := 0
 	cnt := 0
 	for {
 		_, err := file.Read(buf)
@@ -176,7 +175,13 @@ func FirstPassLine(line string, curr_addr ilen, section *string) (ilen, error) {
 		case ".equ": //only for instruction length sized stuff
 			//don't need to populate .equ since it doesn't matter what section or address it is at
 			args := strings.SplitN(op_split[1], ",", 2)
-			valueTable[args[0]] = handle_equ(strings.TrimSpace(args[1]))
+			fmt.Println(args)
+			key := strings.TrimSpace(args[0])
+			val, err := strconv.ParseInt(strings.TrimSpace(args[1]), 0, 64)
+			if err != nil {
+				log.Fatalf("equ value is not valid")
+			}
+			valueTable[key] = ilen(val)
 
 		case ".section":
 			*section = op_split[1]
@@ -509,52 +514,49 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 		var operands = strings.SplitN(op_split[1], ", ", 3)
 		var rs1, inRs1 = regMap[operands[0]]
 		var rs2, inRs2 = regMap[operands[1]]
+		var immediate uint32
 		if !inRs1 && !inRs2 {
 			log.Fatalln("B registers not valid")
 		}
-
-		//check if immediate is equ
-		immediate := uint16(0)
-		val, ok := valueTable[operands[2]]
-		is_num := true
-		if ok {
-			immediate = uint16(val)
-			is_num = false
-			if val > 4094 {
-				log.Fatalln("immediate doesn't fit in 13 bits")
+		val, err := strconv.ParseInt(operands[2], 0, 64)
+		immediate = uint32(val)
+		if err != nil {
+			//check if immediate is equ
+			val, ok := valueTable[operands[2]]
+			if ok {
+				immediate = uint32(val)
+				if val > 4094 {
+					log.Fatalln("immediate doesn't fit in 13 bits")
+				}
+				goto valid_b_immediate
 			}
-		}
-
-		//check if immediate is a label
-		symbol, ok := symbolTable[operands[2]]
-		if ok {
-			symb_addr := symbol.offset + symbol.section.addr
-			offset := int16(symb_addr) - int16(instr_addresses[curr_idx])
-			immediate = uint16(offset)
-			is_num = false
-			if offset < -4096 || offset > 4094 {
-				log.Fatalln("immediate doesn't fit in 13 bits")
+			//check if immediate is a label
+			symbol, ok := symbolTable[operands[2]]
+			if ok {
+				symb_addr := symbol.offset + symbol.section.addr
+				offset := int32(symb_addr) - int32(instr_addresses[curr_idx])
+				immediate = uint32(offset)
+				if offset < -4096 || offset > 4094 {
+					log.Fatalln("immediate doesn't fit in 13 bits")
+				}
+				goto valid_b_immediate
 			}
-		}
-		if is_num {
-			offset, err := strconv.ParseInt(operands[2], 0, 64)
-			if err != nil {
-				log.Fatalf("%s", err.Error())
-			}
-
+			log.Fatalf("J instr: %s\n", err)
+		} else {
 			//sign extend 2's complement to 16 bits
 			bitmask := (1 << 13) - 1
-			val := uint64(offset) & uint64(bitmask) // keep lower 13 bits
+			val := uint64(immediate) & uint64(bitmask) // keep lower 13 bits
 			signBit13 := uint64(1 << (13 - 1))
 			if val&signBit13 != 0 { // sign‑extend to 64 bits
 				val |= ^uint64((1 << 13) - 1)
 			}
-			offset = int64(val)
-			immediate = uint16(offset)
+			offset := int64(val)
+			immediate = uint32(offset)
 			if offset < -4096 || offset > 4094 {
 				log.Fatalf("immediate 0b%016b(%d) does not fit in signed 13 bits", offset, offset)
 			}
 		}
+	valid_b_immediate:
 		//imm[0] can be dropped because all instructions are byte aligned
 		imm_4_1 := (immediate & 0b0000000011110) >> 1
 		imm_5_10 := (immediate & 0b0011111100000) >> 5
@@ -590,8 +592,7 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 				log.Fatalf("U instr: %s\n", err)
 			}
 		}
-		//0000 10101011
-		fmt.Printf("imm: %032b(%d) -> %020b \n", immediate, immediate, immediate>>12)
+		//fmt.Printf("imm: %032b(%d) -> %020b \n", immediate, immediate, immediate>>12)
 		// only take 12 bits from immediate
 		immediate = immediate >> 12
 		instruction |= ilen(itype.Opcode)
@@ -603,38 +604,51 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 	case J: // jump: rd, label
 		var operands = strings.SplitN(op_split[1], ", ", 2)
 		var rd, inRd = regMap[operands[0]]
+		var immediate uint32
 		if !inRd {
 			log.Fatalf("J register is wrong")
 		}
-		//check if immediate is equ
-		immediate := uint16(0)
-		val, ok := valueTable[operands[1]]
-		//is_num := true
-		if ok {
-			immediate = uint16(val)
-			//is_num = false
+		val, err := strconv.ParseInt(operands[1], 0, 64)
+		immediate = uint32(val)
+		if err != nil {
+			//check if immediate is equ
+			val, ok := valueTable[operands[1]]
+			if ok {
+				immediate = uint32(val)
+				goto valid_j_immediate
+			}
+			//check if immediate is a label
+			symbol, ok := symbolTable[operands[1]]
+			if ok {
+				symb_addr := symbol.offset + symbol.section.addr
+				offset := int32(symb_addr) - int32(instr_addresses[curr_idx])
+				immediate = uint32(offset)
+				goto valid_j_immediate
+			}
+			log.Fatalf("J instr: %s\n", err)
 		}
-		//check if immediate is a label
-		symbol, ok := symbolTable[operands[2]]
-		if ok {
-			symb_addr := symbol.offset + symbol.section.addr
-			offset := int16(symb_addr) - int16(instr_addresses[curr_idx])
-			immediate = uint16(offset)
-		}
+	valid_j_immediate:
+		//split immediate into J format
+		imm_12_19 := (immediate >> 12) & 0xFF
+		imm_11 := (immediate >> 11) & 0x1
+		imm_1_10 := (immediate >> 1) & 0x3FF
+		imm_20 := (immediate >> 20) & 0x1
+		//fmt.Printf("imm: %032b(%d) %08b %01b %010b %01b\n", immediate, immediate, imm_12_19, imm_11, imm_1_10, imm_20)
+
 		instruction |= ilen(itype.Opcode)
 		instruction |= ilen(rd) << 7
-		instruction |= ilen(immediate) << 12
+		instruction |= ilen(imm_12_19) << 12
+		instruction |= ilen(imm_11) << 20
+		instruction |= ilen(imm_1_10) << 21
+		instruction |= ilen(imm_20) << 31 //0 0111010101 1 00001010 00110 1101111
+		fmt.Printf("J instr: %032b\n", instruction)
 		populate_bin_instruction(instruction, instr_addresses[curr_idx], bin_arr)
+
 	default:
 		log.Fatalf("unsupported instruction format %q", itype.fmt)
 	}
 	return next_addr, nil
 } // Instruction & labels
-
-func handle_equ(expression string) ilen {
-	fmt.Printf("Expression inside equ: %s \n", expression)
-	return 0
-}
 
 // rounds v up to instruction length
 func align_addr(v ilen) ilen {
