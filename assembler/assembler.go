@@ -463,7 +463,6 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 		instruction |= ilen(immediate) << 20 //010001010110 01011 000 00110 0010011
 		populate_bin_instruction(instruction, instr_addresses[curr_idx], bin_arr)
 		fmt.Printf("I instr: %032b\n", instruction)
-
 	case S: // store: rs2, offset(rs1)
 		var operands = strings.SplitN(op_split[1], ", ", 3)
 		var first_imm ilen
@@ -506,7 +505,6 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 		instruction |= ilen(sec_imm) << 25 //0000000 01010 00110 000 01010 0100011
 		populate_bin_instruction(instruction, instr_addresses[curr_idx], bin_arr)
 		fmt.Printf("S instr: %032b\n", instruction)
-
 	case B: // branch: rs1, rs2, label
 		var operands = strings.SplitN(op_split[1], ", ", 3)
 		var rs1, inRs1 = regMap[operands[0]]
@@ -572,13 +570,61 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 		instruction |= ilen(rs2) << 20
 		instruction |= ilen(imm_5_10) << 25 //0000000 01100 00101 001 1000 0 1100011
 		instruction |= ilen(imm_12) << 31
+		fmt.Printf("B instr: %032b\n", instruction)
 		populate_bin_instruction(instruction, instr_addresses[curr_idx], bin_arr)
-		//fmt.Printf("B instr: %032b\n", instruction)
-
 	case U: // upper-immediate: rd, imm
+		var operands = strings.SplitN(op_split[1], ", ", 2)
+		var rd, inRd = regMap[operands[0]]
+		if !inRd {
+			log.Fatalf("U register is wrong")
+		}
+		//check if immediate is equ
+		immediate := uint32(0)
+		val, ok := valueTable[operands[1]]
+		if ok {
+			immediate = uint32(val)
+		} else {
+			temp, err := strconv.ParseInt(operands[1], 0, 64)
+			immediate = uint32(temp)
+			if err != nil {
+				log.Fatalf("U instr: %s\n", err)
+			}
+		}
+		//0000 10101011
+		fmt.Printf("imm: %032b(%d) -> %020b \n", immediate, immediate, immediate>>12)
+		// only take 12 bits from immediate
+		immediate = immediate >> 12
+		instruction |= ilen(itype.Opcode)
+		instruction |= ilen(rd) << 7
+		instruction |= ilen(immediate) << 12
+		fmt.Printf("U instr: %032b\n", instruction)
+		populate_bin_instruction(instruction, instr_addresses[curr_idx], bin_arr)
 
 	case J: // jump: rd, label
-
+		var operands = strings.SplitN(op_split[1], ", ", 2)
+		var rd, inRd = regMap[operands[0]]
+		if !inRd {
+			log.Fatalf("J register is wrong")
+		}
+		//check if immediate is equ
+		immediate := uint16(0)
+		val, ok := valueTable[operands[1]]
+		//is_num := true
+		if ok {
+			immediate = uint16(val)
+			//is_num = false
+		}
+		//check if immediate is a label
+		symbol, ok := symbolTable[operands[2]]
+		if ok {
+			symb_addr := symbol.offset + symbol.section.addr
+			offset := int16(symb_addr) - int16(instr_addresses[curr_idx])
+			immediate = uint16(offset)
+		}
+		instruction |= ilen(itype.Opcode)
+		instruction |= ilen(rd) << 7
+		instruction |= ilen(immediate) << 12
+		populate_bin_instruction(instruction, instr_addresses[curr_idx], bin_arr)
 	default:
 		log.Fatalf("unsupported instruction format %q", itype.fmt)
 	}

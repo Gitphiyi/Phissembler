@@ -13,7 +13,7 @@ _start:
 deez:
     beq t0, a2, 0b1100010101010 # B instruction test
     beq t0, a2, msg # B instruction label test
-
+    lui t3, 0b11001000100000001010101110101011 # U instruction test
 
 .section .feet
 wakanda:
@@ -23,7 +23,7 @@ wakanda:
 msg: 
     .asciz "hi\n"
 zeros:
-    .zero 20 # 20 bytes of zeros
+    .zero 0 # 20 bytes of zeros
 dword_check:
 .dword 0xFFDDEEAABBCCFFDD
 array:
