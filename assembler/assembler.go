@@ -425,7 +425,6 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 				log.Fatalf("cannot convert val into immediate")
 			}
 		} else {
-			//first check if address is a number or a label
 			open := strings.Index(operands[1], "(")
 			close := strings.Index(operands[1], ")")
 			if open < 0 || close < 0 || close <= open {
@@ -433,6 +432,10 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 			}
 			offset := operands[1][:open]
 			addr := operands[1][open+1 : close]
+			rs1, inRs1 = regMap[addr]
+			if !inRd && !inRs1 {
+				log.Fatalln("invalid I registers")
+			}
 
 			//check for equ
 			val, ok := valueTable[offset]
@@ -443,16 +446,6 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 				immediate = ilen(val)
 				if err != nil {
 					log.Fatalf("cannot convert val into immediate")
-				}
-			}
-			//check for label
-			label, ok := symbolTable[addr]
-			if ok {
-				rs1 = uint8(label.offset + label.section.addr)
-			} else {
-				rs1, inRs1 = regMap[addr]
-				if !inRd && !inRs1 {
-					log.Fatalln("invalid I registers")
 				}
 			}
 		} //immediate is an address
@@ -472,33 +465,115 @@ func BinGenerationLine(curr_idx int, bin_arr []byte, line string, section *strin
 		fmt.Printf("I instr: %032b\n", instruction)
 
 	case S: // store: rs2, offset(rs1)
-	// 	open := strings.Index(str_slice[2], "(")
-	// 	close := strings.Index(str_slice[2], ")")
-	// 	if open < 0 || close < 0 || close <= open {
-	// 		return 0, 0, errors.New("invalid format, expected imm(reg)")
-	// 	}
-	// 	imm := str_slice[2][:open]
-	// 	reg := str_slice[2][open+1 : close]
-	// 	immediate, err := strconv.Atoi(imm)
-	// 	if err != nil {
-	// 		log.Fatal(err)
-	// 	}
-	// 	first_imm := immediate & 0b11111
-	// 	sec_imm := immediate & 0b11111110000
+		var operands = strings.SplitN(op_split[1], ", ", 3)
+		var first_imm ilen
+		var sec_imm ilen
+		var rs1, inRs1 = regMap[operands[0]]
+		var rs2, inRs2 = uint8(0), true
 
-	// 	rs1, inRs1 := regMap[reg]
-	// 	rs2, inRs2 := regMap[str_slice[3]]
-	// 	if !inRs1 || !inRs2 {
-	// 		return 0, addr, errors.New("invalid registers")
-	// 	}
-	// 	instruction |= ilen(itype.Opcode)
-	// 	instruction |= ilen(first_imm) << 7
-	// 	instruction |= ilen(itype.funct3) << 12
-	// 	instruction |= ilen(rs1) << 15
-	// 	instruction |= ilen(rs2) << 20
-	// 	instruction |= ilen(sec_imm) << 25
+		open := strings.Index(operands[1], "(")
+		close := strings.Index(operands[1], ")")
+		if open < 0 || close < 0 || close <= open {
+			log.Fatalln("invalid format, expected imm(reg)")
+		}
+		offset := operands[1][:open]
+		addr := operands[1][open+1 : close]
+		rs2, inRs2 = regMap[addr]
+		if !inRs1 && !inRs2 {
+			log.Fatalln("invalid S registers")
+		}
+
+		//check for equ
+		immediate := ilen(0)
+		val, ok := valueTable[offset]
+		if ok {
+			immediate = val
+		} else {
+			val, err := strconv.Atoi(offset)
+			immediate = ilen(val)
+			if err != nil {
+				log.Fatalf("cannot convert val into immediate")
+			}
+		}
+		first_imm = immediate & 0b11111
+		sec_imm = immediate & 0b11111110000
+
+		instruction |= ilen(itype.Opcode)
+		instruction |= ilen(first_imm) << 7
+		instruction |= ilen(itype.funct3) << 12
+		instruction |= ilen(rs1) << 15
+		instruction |= ilen(rs2) << 20
+		instruction |= ilen(sec_imm) << 25 //0000000 01010 00110 000 01010 0100011
+		populate_bin_instruction(instruction, instr_addresses[curr_idx], bin_arr)
+		fmt.Printf("S instr: %032b\n", instruction)
 
 	case B: // branch: rs1, rs2, label
+		var operands = strings.SplitN(op_split[1], ", ", 3)
+		var rs1, inRs1 = regMap[operands[0]]
+		var rs2, inRs2 = regMap[operands[1]]
+		if !inRs1 && !inRs2 {
+			log.Fatalln("B registers not valid")
+		}
+
+		//check if immediate is equ
+		immediate := uint16(0)
+		val, ok := valueTable[operands[2]]
+		is_num := true
+		if ok {
+			immediate = uint16(val)
+			is_num = false
+			if val > 4094 {
+				log.Fatalln("immediate doesn't fit in 13 bits")
+			}
+		}
+
+		//check if immediate is a label
+		symbol, ok := symbolTable[operands[2]]
+		if ok {
+			symb_addr := symbol.offset + symbol.section.addr
+			offset := int16(symb_addr) - int16(instr_addresses[curr_idx])
+			immediate = uint16(offset)
+			is_num = false
+			if offset < -4096 || offset > 4094 {
+				log.Fatalln("immediate doesn't fit in 13 bits")
+			}
+		}
+		if is_num {
+			offset, err := strconv.ParseInt(operands[2], 0, 64)
+			if err != nil {
+				log.Fatalf("%s", err.Error())
+			}
+
+			//sign extend 2's complement to 16 bits
+			bitmask := (1 << 13) - 1
+			val := uint64(offset) & uint64(bitmask) // keep lower 13 bits
+			signBit13 := uint64(1 << (13 - 1))
+			if val&signBit13 != 0 { // sign‑extend to 64 bits
+				val |= ^uint64((1 << 13) - 1)
+			}
+			offset = int64(val)
+			immediate = uint16(offset)
+			if offset < -4096 || offset > 4094 {
+				log.Fatalf("immediate 0b%016b(%d) does not fit in signed 13 bits", offset, offset)
+			}
+		}
+		//imm[0] can be dropped because all instructions are byte aligned
+		imm_4_1 := (immediate & 0b0000000011110) >> 1
+		imm_5_10 := (immediate & 0b0011111100000) >> 5
+		imm_11 := (immediate & 0b0100000000000) >> 11
+		imm_12 := (immediate & 0b1000000000000) >> 12
+		//fmt.Printf("imm: %013b(%d) -> %01b %04b %06b %01b\n", uint16(immediate), int16(immediate), imm_11, imm_4_1, imm_5_10, imm_12)
+
+		instruction |= ilen(itype.Opcode)
+		instruction |= ilen(imm_11) << 7
+		instruction |= ilen(imm_4_1) << 8
+		instruction |= ilen(itype.funct3) << 12
+		instruction |= ilen(rs1) << 15
+		instruction |= ilen(rs2) << 20
+		instruction |= ilen(imm_5_10) << 25 //0000000 01100 00101 001 1000 0 1100011
+		instruction |= ilen(imm_12) << 31
+		populate_bin_instruction(instruction, instr_addresses[curr_idx], bin_arr)
+		//fmt.Printf("B instr: %032b\n", instruction)
 
 	case U: // upper-immediate: rd, imm
 
@@ -534,5 +609,4 @@ func populate_bin_instruction(instruction ilen, addr ilen, byte_arr []byte) {
 		//fmt.Printf("%08b, ", ibyte)
 		byte_arr[addr+i] = byte(ibyte)
 	}
-	fmt.Println()
 }

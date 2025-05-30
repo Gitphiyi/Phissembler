@@ -11,7 +11,8 @@ _start:
     sb t1, 10(a0) # S instruction test
     # tuff
 deez:
-    beq t0, a2
+    beq t0, a2, 0b1100010101010 # B instruction test
+    beq t0, a2, msg # B instruction label test
 
 
 .section .feet
