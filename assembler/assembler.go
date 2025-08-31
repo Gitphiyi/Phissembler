@@ -16,7 +16,7 @@ import (
 var symbolTable = make(map[string]*Symbol) //symbol mapping
 var valueTable = make(map[string]ilen)     //for equ
 var sectionTable = make(map[string]*Section)
-var instr_addresses = make([]ilen, 0, 10)
+var instr_addresses = make([]ilen, 0, 10) //arbitrarily set initialized capacity of slice (list in Go)
 var quoted = regexp.MustCompile(`"([^"\\]*(\\.[^"\\]*)*)"`)
 
 func Print_Bin(filename string) {
