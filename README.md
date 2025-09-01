@@ -16,7 +16,7 @@ Before diving into how the assembler works, some more background information is 
 There are 4 main different sections that assembly can be apart of: .text, .data, .rodata, and .bss (additional ones include .ctor, .plt, etc. but aren't implemented in this assembler). If .text is not specified, then it is assumed that all the instructions are apart of that section. The .text contains all the instructions, .data contains initalized writable globals, .rodata contains read only data, .bss contains uninitialized global variables. Later, the linker uses those sections to lay out the final executable, and the loader maps them into memory at runtime.
 
 #### Directives
-Directives can be many things
+Directives can be many things and do many things. They are pseudo-ops in that they don't actually run on the CPU, but are "executed" by the assembler. The different types of directives include sections, data, symbol management, and alignment. 
 Description of what each directive does: https://developer.arm.com/documentation/den0013/0400/Introduction-to-Assembly-Language/Introduction-to-the-GNU-Assembler/Assembler-directives
 
 #### Instructions
